@@ -33,10 +33,10 @@ st.markdown("""
 st.title("📊 PDF to Excel Converter")
 st.caption("Upload your PDF and convert it instantly ✨")
 
-# 📦 UPLOAD SECTION
-st.subheader("📤 Upload File")
+# 📦 UPLOAD
 uploaded_files = st.file_uploader("Upload PDF", accept_multiple_files=True)
 
+# 🏢 PILIH UNIT
 unit = st.selectbox(
     "Pilih Unit",
     ["Nirwana", "Lovina", "Lembongan", "The Club"]
@@ -44,10 +44,11 @@ unit = st.selectbox(
 
 all_data = []
 
+# 🔍 PATTERN
 pattern1 = re.compile(r"^\d+\s+(.*?)\s+([\d,\.]+)\s+([A-Z]+)\s+([\d,\.]+)\s+([\d,\.]+)")
-pattern2 = re.compile(r"^(.*?)\s+([\d,]+\.\d+)\s+([A-Z]+)\s+([\d,]+\.\d+)\s+([\d,]+\.\d+)\s+(.+)$")
+pattern2 = re.compile(r"^(.*?)\s+([\d,\.]+)\s+([A-Z]+)\s+([\d,\.]+)\s+([\d,\.]+)\s+(.*)$")
 
-# 🚀 CONVERT BUTTON
+# 🚀 PROCESS
 if uploaded_files:
     st.success(f"{len(uploaded_files)} file uploaded ✅")
 
@@ -58,78 +59,71 @@ if uploaded_files:
                     for page in pdf.pages:
                         text = page.extract_text()
 
-                        if text:
-                            lines = text.split("\n")
+                        if not text:
+                            continue
 
-                            for line in lines:
-                                line = line.strip()
+                        lines = text.split("\n")
 
-                                if "Subtotal" in line or "Supplier" in line:
-                                    continue
+                        for line in lines:
+                            line = line.strip()
 
-                                match1 = pattern1.match(line)
-                                match2 = pattern2.match(line)
+                            if "Subtotal" in line or "Supplier" in line:
+                                continue
 
-                                if match1:
-                                    name, qty, unit, price, amount = match1.groups()
-                                    supplier = "Unknown"
+                            remarks = "-"  # default
 
-                                elif match2:
-                                    name, qty, unit, price, amount, supplier = match2.groups()
+                            match1 = pattern1.match(line)
+                            match2 = pattern2.match(line)
 
+                            # 🔹 FORMAT 1
+                            if match1:
+                                name, qty, unit_item, price, amount = match1.groups()
+                                supplier = "Unknown"
+
+                            # 🔹 FORMAT 2 (ADA REMARKS)
+                            elif match2:
+                                name, qty, unit_item, price, amount, tail = match2.groups()
+
+                                parts = tail.split()
+
+                                if len(parts) >= 2:
+                                    supplier = " ".join(parts[-2:])
+                                    remarks = " ".join(parts[:-2])
                                 else:
-                                    continue
+                                    supplier = tail
 
-                                all_data.append({
-                                    "Supplier": supplier,
-                                    "Item": name,
-                                    "Qty": qty,
-                                    "Unit": unit,
-                                    "Price": price,
-                                    "Amount": amount
-                                })
+                            else:
+                                continue
+
+                            all_data.append({
+                                "Unit": unit,
+                                "Supplier": supplier,
+                                "Item": name,
+                                "Qty": qty,
+                                "Unit Item": unit_item,
+                                "Price": price,
+                                "Amount": amount,
+                                "Remarks": remarks
+                            })
 
         df = pd.DataFrame(all_data)
 
         if not df.empty:
             st.success("✅ Conversion success!")
 
-            # 📊 PREVIEW DATA
+            # 📊 PREVIEW
             st.subheader("📊 Preview Data")
             st.dataframe(df, use_container_width=True)
 
-            # 💾 DOWNLOAD
+            # 💾 SAVE MULTI SHEET
             file = "hasil.xlsx"
-            df.to_excel(file, index=False)
+            with pd.ExcelWriter(file) as writer:
+                for u in df["Unit"].unique():
+                    df[df["Unit"] == u].to_excel(writer, sheet_name=u, index=False)
 
+            # ⬇️ DOWNLOAD
             with open(file, "rb") as f:
                 st.download_button("⬇️ Download Excel", f, file_name="hasil.xlsx")
-
-        else:
-            st.error("Data kosong 😭")
-                            elif match2:
-                                name, qty, unit, price, amount, supplier = match2.groups()
-
-                            else:
-                                continue
-
-                            all_data.append({
-                                "Supplier": supplier,
-                                "Inv Name": name,
-                                "Qty": qty,
-                                "Unit": unit,
-                                "Price": price,
-                                "Amount": amount
-                            })
-
-        df = pd.DataFrame(all_data)
-
-        if not df.empty:
-            file = "hasil.xlsx"
-            df.to_excel(file, index=False)
-
-            with open(file, "rb") as f:
-                st.download_button("Download Excel", f, file_name="hasil.xlsx")
 
         else:
             st.error("Data kosong 😭")
