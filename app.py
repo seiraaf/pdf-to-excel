@@ -9,8 +9,9 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
+SUPPLIER_DB_PATH = r"C:\Users\TRM\Downloads\DATABASE SUP.xlsx"
 UNITS = ["Nirwana", "Lovina", "Lembongan", "The Club", "Kanaka"]
-COLUMNS = ["Unit", "Supplier", "Item", "Qty", "Unit Item", "Price", "Amount", "Remarks"]
+COLUMNS = ["Unit", "Supplier", "No PO", "Item", "Qty", "Unit Item", "Price", "Amount", "Remarks"]
 EXPORT_HEADERS = ["Supplier", "No PO", "Inv Name", "Q", "Unit", "Description", "Qty Datang", "Remark"]
 UNIT_TITLES = {
     "Nirwana": "NIRWANA BEACH RESORT",
@@ -64,17 +65,9 @@ SKIP_KEYWORDS = (
     "purchase order",
     "prepared by",
     "approved by",
+    "discount",
+    "tax & freight",
     "total :",
-)
-SUPPLIER_HINTS = (
-    "supplier",
-    "seafood",
-    "ayam",
-    "bali",
-    "ud ",
-    "cv ",
-    "pt ",
-    "eme ",
 )
 TABLE_SETTINGS = {
     "vertical_strategy": "text",
@@ -86,7 +79,7 @@ TABLE_SETTINGS = {
 }
 
 
-st.set_page_config(page_title="PDF to Excel", page_icon="📊", layout="wide")
+st.set_page_config(page_title="PDF to Excel", page_icon="chart", layout="wide")
 
 
 if "all_data" not in st.session_state:
@@ -112,6 +105,54 @@ def to_excel_number(value):
     except ValueError:
         return clean_text(value)
     return int(number) if number.is_integer() else number
+
+
+def normalize_lookup(value):
+    value = clean_text(value, "").upper()
+    value = value.replace("&", " AND ")
+    value = re.sub(r"[^A-Z0-9]+", " ", value)
+    return clean_text(value, "")
+
+
+@st.cache_data(show_spinner=False)
+def load_supplier_database(path):
+    try:
+        df = pd.read_excel(path)
+    except Exception:
+        return pd.DataFrame(columns=["NAMA", "VENDOR", "LOOKUP"])
+
+    df.columns = [clean_text(column, "").upper() for column in df.columns]
+    if "NAMA" not in df.columns or "VENDOR" not in df.columns:
+        return pd.DataFrame(columns=["NAMA", "VENDOR", "LOOKUP"])
+
+    df = df[["NAMA", "VENDOR"]].dropna(how="any")
+    df["NAMA"] = df["NAMA"].map(lambda value: clean_text(value, ""))
+    df["VENDOR"] = df["VENDOR"].map(lambda value: clean_text(value, ""))
+    df["LOOKUP"] = df["NAMA"].map(normalize_lookup)
+    df = df[df["LOOKUP"] != ""]
+    return df
+
+
+def lookup_supplier(item, supplier_db):
+    item_lookup = normalize_lookup(item)
+    if not item_lookup or supplier_db.empty:
+        return ""
+
+    exact = supplier_db[supplier_db["LOOKUP"] == item_lookup]
+    if not exact.empty:
+        return exact.iloc[0]["VENDOR"]
+
+    candidates = []
+    for row in supplier_db.itertuples(index=False):
+        db_item = row.LOOKUP
+        if len(db_item) < 4:
+            continue
+        if db_item in item_lookup or item_lookup in db_item:
+            candidates.append((len(db_item), row.VENDOR))
+
+    if candidates:
+        return sorted(candidates, reverse=True)[0][1]
+    return ""
 
 
 def looks_like_number(value):
@@ -144,7 +185,7 @@ def format_po_date(raw_date):
 
 def extract_po_date(text):
     for line in (text or "").splitlines():
-        match = re.search(r"\bDate\b\s*:?[\s-]*(.+)$", line, re.IGNORECASE)
+        match = re.search(r"\b(?:Date|Tanggal)\b\s*:?[\s-]*(.+)$", line, re.IGNORECASE)
         if match:
             po_date = format_po_date(match.group(1))
             if po_date:
@@ -152,9 +193,14 @@ def extract_po_date(text):
     return ""
 
 
-def extract_page_remark(text):
+def extract_no_po(text):
+    match = re.search(r"\bPO/\d+/\d+\b", text or "", re.IGNORECASE)
+    return clean_text(match.group(0), "") if match else ""
+
+
+def extract_header_remark(text):
     for line in (text or "").splitlines():
-        match = re.search(r"\bRemark\b\s*:?[\s-]*(.+)$", line, re.IGNORECASE)
+        match = re.search(r"\bRemark\b\s*:?[\s-]*(.+)$", line, re.IGNORECASE)
         if match:
             remark = clean_text(match.group(1), "")
             if remark and not remark.lower().startswith(("price", "amount", "supplier")):
@@ -162,36 +208,37 @@ def extract_page_remark(text):
     return "-"
 
 
-def split_tail(tail, default_remarks="-"):
-    """Pisahkan supplier dan remarks dari teks setelah kolom amount."""
+def extract_row_remark(tail, header_remark="-"):
     tail = clean_text(tail, "")
-    default_remarks = clean_text(default_remarks)
-
+    header_remark = clean_text(header_remark)
     if not tail:
-        return default_remarks, "Unknown"
+        return header_remark
 
-    separator_match = re.search(r"\s{2,}|\s[-–—]\s|\s\|\s", tail)
-    if separator_match:
-        remarks = clean_text(tail[: separator_match.start()], "")
-        supplier = clean_text(tail[separator_match.end() :], "")
-        if remarks and supplier:
-            return remarks, supplier
+    # Format PO kedua: Amount Remark PR No.
+    tail_without_pr = re.split(r"\bPR/\d+/\d+\b", tail, maxsplit=1, flags=re.IGNORECASE)[0]
+    tail_without_pr = clean_text(tail_without_pr, "")
+    if tail_without_pr:
+        return tail_without_pr
 
-    lowered_tail = f" {tail.lower()} "
-    if default_remarks != "-" or any(hint in lowered_tail for hint in SUPPLIER_HINTS):
-        return default_remarks, tail
-
-    parts = tail.split()
-    if len(parts) == 1:
-        return default_remarks, parts[0]
-
-    supplier_word_count = 2 if len(parts) >= 3 else 1
-    remarks = clean_text(" ".join(parts[:-supplier_word_count]))
-    supplier = clean_text(" ".join(parts[-supplier_word_count:]), "Unknown")
-    return remarks, supplier
+    # Format Daily Market List biasanya supplier ada setelah Amount, remarks ada di header.
+    return header_remark
 
 
-def parse_line(line, unit, default_remarks="-", po_date=""):
+def make_row(unit, item, qty, unit_item, price, amount, remarks, no_po, supplier_db):
+    return {
+        "Unit": unit,
+        "Supplier": lookup_supplier(item, supplier_db),
+        "No PO": no_po,
+        "Item": clean_text(item),
+        "Qty": normalize_number(qty),
+        "Unit Item": clean_text(unit_item).upper(),
+        "Price": normalize_number(price),
+        "Amount": normalize_number(amount),
+        "Remarks": clean_text(remarks),
+    }
+
+
+def parse_line(line, unit, header_remark="-", po_date="", no_po="", supplier_db=None):
     line = clean_text(line, "")
     if should_skip_line(line):
         return None
@@ -201,22 +248,23 @@ def parse_line(line, unit, default_remarks="-", po_date=""):
         return None
 
     data = match.groupdict()
-    remarks, supplier = split_tail(data.get("tail", ""), default_remarks)
+    remarks = extract_row_remark(data.get("tail", ""), header_remark)
+    row = make_row(
+        unit,
+        data["item"],
+        data["qty"],
+        data["unit"],
+        data["price"],
+        data["amount"],
+        remarks,
+        no_po,
+        supplier_db,
+    )
+    row["PO Date"] = po_date
+    return row
 
-    return {
-        "Unit": unit,
-        "Supplier": supplier,
-        "Item": clean_text(data["item"]),
-        "Qty": normalize_number(data["qty"]),
-        "Unit Item": clean_text(data["unit"]).upper(),
-        "Price": normalize_number(data["price"]),
-        "Amount": normalize_number(data["amount"]),
-        "Remarks": remarks,
-        "PO Date": po_date,
-    }
 
-
-def parse_table_row(cells, unit, default_remarks="-", po_date=""):
+def parse_table_row(cells, unit, header_remark="-", po_date="", no_po="", supplier_db=None):
     cells = [clean_text(cell, "") for cell in cells]
     cells = [cell for cell in cells if cell]
     line = " ".join(cells)
@@ -246,44 +294,46 @@ def parse_table_row(cells, unit, default_remarks="-", po_date=""):
         return None
 
     tail = clean_text(" ".join(cells[amount_index + 1 :]), "")
-    remarks, supplier = split_tail(tail, default_remarks)
-
-    return {
-        "Unit": unit,
-        "Supplier": supplier,
-        "Item": item,
-        "Qty": normalize_number(cells[qty_index]),
-        "Unit Item": clean_text(cells[unit_index]).upper(),
-        "Price": normalize_number(cells[price_index]),
-        "Amount": normalize_number(cells[amount_index]),
-        "Remarks": remarks,
-        "PO Date": po_date,
-    }
+    remarks = extract_row_remark(tail, header_remark)
+    row = make_row(
+        unit,
+        item,
+        cells[qty_index],
+        cells[unit_index],
+        cells[price_index],
+        cells[amount_index],
+        remarks,
+        no_po,
+        supplier_db,
+    )
+    row["PO Date"] = po_date
+    return row
 
 
 def row_key(row):
     return tuple(row[column] for column in ["Unit", "Item", "Qty", "Unit Item", "Price", "Amount"])
 
 
-def parse_pdf(uploaded_file, unit):
+def parse_pdf(uploaded_file, unit, supplier_db):
     rows = []
     seen = set()
 
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
             text = page.extract_text(x_tolerance=2, y_tolerance=3) or ""
-            default_remarks = extract_page_remark(text)
+            header_remark = extract_header_remark(text)
             po_date = extract_po_date(text)
+            no_po = extract_no_po(text)
 
             for table in page.extract_tables(TABLE_SETTINGS) or []:
                 for cells in table:
-                    row = parse_table_row(cells, unit, default_remarks, po_date)
+                    row = parse_table_row(cells, unit, header_remark, po_date, no_po, supplier_db)
                     if row and row_key(row) not in seen:
                         rows.append(row)
                         seen.add(row_key(row))
 
             for line in text.splitlines():
-                row = parse_line(line, unit, default_remarks, po_date)
+                row = parse_line(line, unit, header_remark, po_date, no_po, supplier_db)
                 if row and row_key(row) not in seen:
                     rows.append(row)
                     seen.add(row_key(row))
@@ -293,8 +343,8 @@ def parse_pdf(uploaded_file, unit):
 
 def export_row(row):
     return [
-        "" if row.get("Supplier") == "Unknown" else row.get("Supplier", ""),
-        "",
+        row.get("Supplier", ""),
+        row.get("No PO", ""),
         row.get("Item", ""),
         to_excel_number(row.get("Qty", "")),
         row.get("Unit Item", ""),
@@ -323,7 +373,7 @@ def style_sheet(ws, unit_name, po_date, last_row):
     ws.row_dimensions[3].height = 8
     ws.row_dimensions[4].height = 18
 
-    widths = [18, 18, 44, 10, 8, 48, 16, 16]
+    widths = [18, 18, 44, 10, 8, 48, 16, 20]
     for index, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(index)].width = width
 
@@ -355,12 +405,11 @@ def build_excel(data):
     workbook.remove(workbook.active)
 
     for unit_name in UNITS:
-        unit_df = df[df["Unit"] == unit_name] if not df.empty else pd.DataFrame()
-        if unit_df.empty:
-            continue
-
         ws = workbook.create_sheet(unit_name[:31])
-        po_dates = [clean_text(value, "") for value in unit_df.get("PO Date", []) if clean_text(value, "")]
+        unit_df = df[df["Unit"] == unit_name] if not df.empty and "Unit" in df.columns else pd.DataFrame()
+        po_dates = []
+        if not unit_df.empty and "PO Date" in unit_df.columns:
+            po_dates = [clean_text(value, "") for value in unit_df["PO Date"] if clean_text(value, "")]
         po_date = po_dates[0] if po_dates else ""
 
         ws.append([""] * len(EXPORT_HEADERS))
@@ -368,25 +417,29 @@ def build_excel(data):
         ws.append([""] * len(EXPORT_HEADERS))
         ws.append(EXPORT_HEADERS)
 
-        for row in unit_df.to_dict("records"):
-            ws.append(export_row(row))
+        if not unit_df.empty:
+            for row in unit_df.to_dict("records"):
+                ws.append(export_row(row))
 
         style_sheet(ws, unit_name, po_date, ws.max_row)
-
-    if not workbook.sheetnames:
-        ws = workbook.create_sheet("Sheet1")
-        ws.append(EXPORT_HEADERS)
 
     workbook.save(output)
     output.seek(0)
     return output
 
 
-st.title("📊 PDF to Excel Converter")
-st.caption("Upload per unit → Tambah Data → Convert Semua Unit → download 1 Excel multi sheet.")
+supplier_db = load_supplier_database(SUPPLIER_DB_PATH)
+
+st.title("PDF to Excel Converter")
+st.caption("Upload per unit -> Tambah Data -> Convert Semua Unit -> download 1 Excel multi sheet.")
 
 with st.sidebar:
     st.header("Status Data")
+    if supplier_db.empty:
+        st.warning("Database supplier belum terbaca. Cek file DATABASE SUP.xlsx.")
+    else:
+        st.success(f"Database supplier terbaca: {len(supplier_db)} item.")
+
     if st.session_state.all_data:
         status_df = pd.DataFrame(st.session_state.all_data)
         counts = status_df.groupby("Unit").size().reindex(UNITS, fill_value=0)
@@ -430,7 +483,7 @@ if add_clicked:
 
     with st.spinner(f"Membaca PDF untuk {unit}..."):
         for uploaded_file in uploaded_files:
-            rows = parse_pdf(uploaded_file, unit)
+            rows = parse_pdf(uploaded_file, unit, supplier_db)
             if rows:
                 st.session_state.all_data.extend(rows)
                 added_rows += len(rows)
@@ -456,13 +509,13 @@ if st.session_state.all_data:
     st.subheader("Preview Data Sementara")
     st.dataframe(df_preview[preview_columns], use_container_width=True, hide_index=True)
 
-    if st.button("🚀 Convert Semua Unit", use_container_width=True):
+    if st.button("Convert Semua Unit", use_container_width=True):
         st.session_state.excel_file = build_excel(st.session_state.all_data)
-        st.success("Excel berhasil dibuat dengan format report. Silakan download file di bawah.")
+        st.success("Excel berhasil dibuat: 1 file dengan sheet per unit.")
 
     if st.session_state.excel_file:
         st.download_button(
-            "⬇️ Download Excel",
+            "Download Excel",
             data=st.session_state.excel_file,
             file_name="hasil_final.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
