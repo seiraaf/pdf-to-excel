@@ -114,6 +114,10 @@ def normalize_lookup(value):
     return clean_text(value, "")
 
 
+def compact_lookup(value):
+    return normalize_lookup(value).replace(" ", "")
+
+
 @st.cache_data(show_spinner=False)
 def prepare_supplier_database(file_bytes=None, path=None):
     try:
@@ -122,22 +126,24 @@ def prepare_supplier_database(file_bytes=None, path=None):
         else:
             df = pd.read_excel(path)
     except Exception:
-        return pd.DataFrame(columns=["NAMA", "VENDOR", "LOOKUP"])
+        return pd.DataFrame(columns=["NAMA", "VENDOR", "LOOKUP", "LOOKUP_COMPACT"])
 
     df.columns = [clean_text(column, "").upper() for column in df.columns]
     if "NAMA" not in df.columns or "VENDOR" not in df.columns:
-        return pd.DataFrame(columns=["NAMA", "VENDOR", "LOOKUP"])
+        return pd.DataFrame(columns=["NAMA", "VENDOR", "LOOKUP", "LOOKUP_COMPACT"])
 
     df = df[["NAMA", "VENDOR"]].dropna(how="any")
     df["NAMA"] = df["NAMA"].map(lambda value: clean_text(value, ""))
     df["VENDOR"] = df["VENDOR"].map(lambda value: clean_text(value, ""))
     df["LOOKUP"] = df["NAMA"].map(normalize_lookup)
+    df["LOOKUP_COMPACT"] = df["NAMA"].map(compact_lookup)
     df = df[df["LOOKUP"] != ""]
     return df
 
 
 def lookup_supplier(item, supplier_db):
     item_lookup = normalize_lookup(item)
+    item_compact = compact_lookup(item)
     if not item_lookup or supplier_db.empty:
         return ""
 
@@ -145,13 +151,20 @@ def lookup_supplier(item, supplier_db):
     if not exact.empty:
         return exact.iloc[0]["VENDOR"]
 
+    compact_exact = supplier_db[supplier_db["LOOKUP_COMPACT"] == item_compact]
+    if not compact_exact.empty:
+        return compact_exact.iloc[0]["VENDOR"]
+
     candidates = []
     for row in supplier_db.itertuples(index=False):
         db_item = row.LOOKUP
-        if len(db_item) < 4:
+        db_compact = row.LOOKUP_COMPACT
+        if len(db_compact) < 4:
             continue
         if db_item in item_lookup or item_lookup in db_item:
             candidates.append((len(db_item), row.VENDOR))
+        elif db_compact in item_compact or item_compact in db_compact:
+            candidates.append((len(db_compact), row.VENDOR))
 
     if candidates:
         return sorted(candidates, reverse=True)[0][1]
