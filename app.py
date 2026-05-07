@@ -115,9 +115,12 @@ def normalize_lookup(value):
 
 
 @st.cache_data(show_spinner=False)
-def load_supplier_database(path):
+def prepare_supplier_database(file_bytes=None, path=None):
     try:
-        df = pd.read_excel(path)
+        if file_bytes:
+            df = pd.read_excel(BytesIO(file_bytes))
+        else:
+            df = pd.read_excel(path)
     except Exception:
         return pd.DataFrame(columns=["NAMA", "VENDOR", "LOOKUP"])
 
@@ -428,17 +431,23 @@ def build_excel(data):
     return output
 
 
-supplier_db = load_supplier_database(SUPPLIER_DB_PATH)
-
 st.title("PDF to Excel Converter")
 st.caption("Upload per unit -> Tambah Data -> Convert Semua Unit -> download 1 Excel multi sheet.")
 
 with st.sidebar:
-    st.header("Status Data")
+    st.header("Database Supplier")
+    supplier_file = st.file_uploader("Upload DATABASE SUP.xlsx", type=["xlsx"], key="supplier_db")
+    if supplier_file:
+        supplier_db = prepare_supplier_database(supplier_file.getvalue())
+    else:
+        supplier_db = prepare_supplier_database(path=SUPPLIER_DB_PATH)
+
     if supplier_db.empty:
-        st.warning("Database supplier belum terbaca. Cek file DATABASE SUP.xlsx.")
+        st.warning("Upload DATABASE SUP.xlsx dulu supaya supplier bisa otomatis terisi.")
     else:
         st.success(f"Database supplier terbaca: {len(supplier_db)} item.")
+
+    st.header("Status Data")
 
     if st.session_state.all_data:
         status_df = pd.DataFrame(st.session_state.all_data)
