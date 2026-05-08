@@ -327,12 +327,56 @@ def parse_table_row(cells, unit, header_remark="-", po_date="", no_po="", suppli
 
 
 def row_key(row):
-    return tuple(row[column] for column in ["Unit", "Item", "Qty", "Unit Item", "Price", "Amount"])
+    return (
+        row.get("Unit", ""),
+        row.get("No PO", ""),
+        compact_lookup(row.get("Item", "")),
+        normalize_number(row.get("Qty", "")),
+        clean_text(row.get("Unit Item", "")).upper(),
+        normalize_number(row.get("Price", "")),
+        normalize_number(row.get("Amount", "")),
+    )
+
+
+def item_spacing_score(item):
+    item = clean_text(item, "")
+    tokens = item.split()
+    short_tokens = sum(1 for token in tokens if len(token) <= 2)
+    return (short_tokens, len(tokens), len(item))
+
+
+def prefer_new_row(existing, new_row):
+    if not existing:
+        return True
+    return item_spacing_score(new_row.get("Item", "")) < item_spacing_score(existing.get("Item", ""))
+
+
+def merge_row(existing, new_row):
+    if prefer_new_row(existing, new_row):
+        merged = dict(new_row)
+        fallback = existing
+    else:
+        merged = dict(existing)
+        fallback = new_row
+
+    for field in ["Supplier", "No PO", "Remarks", "PO Date"]:
+        if clean_text(merged.get(field, ""), "") in ["", "-", "Unknown"]:
+            merged[field] = fallback.get(field, merged.get(field, ""))
+    return merged
+
+
+def add_unique_row(rows_by_key, order, row):
+    key = row_key(row)
+    if key not in rows_by_key:
+        rows_by_key[key] = row
+        order.append(key)
+        return
+    rows_by_key[key] = merge_row(rows_by_key[key], row)
 
 
 def parse_pdf(uploaded_file, unit, supplier_db):
-    rows = []
-    seen = set()
+    rows_by_key = {}
+    order = []
 
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
@@ -344,17 +388,15 @@ def parse_pdf(uploaded_file, unit, supplier_db):
             for table in page.extract_tables(TABLE_SETTINGS) or []:
                 for cells in table:
                     row = parse_table_row(cells, unit, header_remark, po_date, no_po, supplier_db)
-                    if row and row_key(row) not in seen:
-                        rows.append(row)
-                        seen.add(row_key(row))
+                    if row:
+                        add_unique_row(rows_by_key, order, row)
 
             for line in text.splitlines():
                 row = parse_line(line, unit, header_remark, po_date, no_po, supplier_db)
-                if row and row_key(row) not in seen:
-                    rows.append(row)
-                    seen.add(row_key(row))
+                if row:
+                    add_unique_row(rows_by_key, order, row)
 
-    return rows
+    return [rows_by_key[key] for key in order]
 
 
 def export_row(row):
